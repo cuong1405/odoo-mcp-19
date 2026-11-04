@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - **Version**: 2.2.0 · **Python**: 3.10+ · **MCP**: 2026-07-28 *and* 2025-11-25, negotiated per connection (FastMCP `>=4.1.5,<5`, MCP SDK v2; `cryptography>=42` is a *direct* dependency of `token_crypto`, not just a transitive Authlib one; `anyio>=4` is a direct dependency of the event-loop offload in `server.py` / `resources.py`)
 - **One deployment, two protocol eras.** FastMCP 4 answers the sessionless `2026-07-28` protocol and the session-based `2025-11-25` handshake from the same process; `tests/test_protocol_eras.py` drives the real app in both and must stay green. Nothing may rely on a session: no `ctx.set_state`, no `on_initialize` middleware, no server-initiated request (`ctx.elicit`, sampling, roots — they do not exist on a modern connection). **The `<5` ceiling is deliberate**: a FastMCP major is not a drop-in (3 → 4 removed a tool and moved the wire types and the task engine) — see `docs/mcp-2026-07-28-migration.md` and `tests/test_dependency_pins.py`, which fails the build if the bound is widened or the environment drifts. **`uv.lock` is gitignored** (`.gitignore`: *"project uses pip + pyproject.toml"*) — it pins only your local `.venv`, never the documented `pip install git+…` path, so `pyproject.toml` is the only thing between a fresh install and the next major. Do not relax the ceiling on the strength of the lockfile.
-- **Surface**: 3 tools (`execute_method`, `batch_execute`, `read_resource`), 38 `odoo://` resources, 12 generic prompts. **`execute_workflow` is gone** (since v2.2.0): its two hard-coded workflows were wrong against JSON-2 (`lead_to_won` sent `partner_id` to `convert_opportunity`, whose parameter is `partner`, and marked the lead won anyway; `create_and_post_invoice` treated `create`'s `[id]` result as an int), and multi-step work is `batch_execute` (one gate for the whole operations list) or successive `execute_method` calls. `tests/test_tool_surface.py` pins the tool set and scans the shipped package for the old name; `tests/test_batch_gate.py` drives the batch confirmation gate through the tool. **No Cyanview skill is served here** (since v2.1.0): the `cyanview-*` workflows live exclusively in the private skills repository `~/ddev/cyanview-skills` and are installed client side (plugin / local skills). `tests/test_prompt_surface.py` fails if a `cyanview-*` prompt, a packaged `skills/` dir or the old skill modules come back.
+- **Surface**: 7 tools (`execute_method`, `batch_execute`, `read_resource`, `upload_attachment`, `capture_page`, `list_attachments`, `read_attachment`), 38 `odoo://` resources, 12 generic prompts. **`execute_workflow` is gone** (since v2.2.0): its two hard-coded workflows were wrong against JSON-2 (`lead_to_won` sent `partner_id` to `convert_opportunity`, whose parameter is `partner`, and marked the lead won anyway; `create_and_post_invoice` treated `create`'s `[id]` result as an int), and multi-step work is `batch_execute` (one gate for the whole operations list) or successive `execute_method` calls. `tests/test_tool_surface.py` pins the tool set and scans the shipped package for the old name; `tests/test_batch_gate.py` drives the batch confirmation gate through the tool. **No Cyanview skill is served here** (since v2.1.0): the `cyanview-*` workflows live exclusively in the private skills repository `~/ddev/cyanview-skills` and are installed client side (plugin / local skills). `tests/test_prompt_surface.py` fails if a `cyanview-*` prompt, a packaged `skills/` dir or the old skill modules come back.
 - **Discovery is via resources, action is via tools** — there is no `list_models` tool, agents read `odoo://models` instead. `odoo://templates` lists every resource.
 - **Two deployment shapes**: single-user (STDIO or HTTP with one static `MCP_API_KEY`) and **multi-user HTTP** (per-user `cv_odoo_…` keys from the CLORAG-managed registry, personal Odoo clients — see "Multi-user mode" below).
 
@@ -85,7 +85,7 @@ The package was split in v1.14.0 (commit `ea10d79`) from a 3762-line `server.py`
 src/odoo_mcp/
 ├── __main__.py        CLI entry: STDIO/HTTP bootstrap, --setup wizard, HTTP auth preflight
 ├── app.py             FastMCP instance + icon + auth provider selection + middleware wiring — imported first
-├── server.py          3 tools + _RESOURCE_ROUTES table + safety integration; execute_method is an
+├── server.py          7 tools + _RESOURCE_ROUTES table + safety integration; execute_method is an
 │                      orchestrator over phase helpers (_parse_json_args, _resolve_many2one_names,
 │                      _reject_private_method, _classify_and_gate, _apply_search_defaults,
 │                      _search_read_fallback, _failure_response); _confirmation_gate and
@@ -268,3 +268,14 @@ Release commit convention: `chore(release): X.Y.Z — <summary>`.
 - The canonical MCP server name in client configs (README, setup wizard, Claude Desktop config) is **`odoo19-mcp`** — keep it consistent when touching docs or the wizard.
 - `live` tests are direct scripts that mutate env state; only `--ignore=tests/live` keeps pytest off them (`test_locked_mode_live.py` has collectable `test_*` functions). Don't reorganize them into pytest fixtures without checking the in-file note.
 - AI module (Enterprise): models `ai.agent`, `ai.topic`, `ai.agent.source`, `ai.embedding`. Special methods (checked on Odoo Online 19.3): `ai.agent.open_agent_chat`, `ai.agent.source.create_from_urls`, `ai.agent.source.create_from_binary_files`. Documented in `module_knowledge.json`.
+
+## Page capture and attachment artifacts (Unreleased)
+
+`capture_page` gates `ir.attachment.create` before rendering, then runs optional Playwright
+in a separate process with a fresh browser/context, a DNS-pinning egress proxy, and bounded
+concurrency/queue/rate limits. No screenshot bytes are returned by capture. `read_attachment`
+returns image content only on demand; `list_attachments` reads metadata only.
+`upload_attachment` accepts existing base64 file bytes. All use the caller's Odoo client.
+See `docs/page-capture.md`; capture dependencies are optional (`.[capture]`).
+Run preview/capture tests with the capture extra installed. `capture_worker.py` must never
+receive Odoo credentials or expose raw browser errors. No `--no-sandbox` fallback.

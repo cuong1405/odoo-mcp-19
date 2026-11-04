@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Server-side `capture_page` stores PNG/JPEG/PDF/HTML/text/Markdown in non-public
+  `ir.attachment` records and returns metadata only. Optional Playwright worker with
+  sandboxed Chromium, destination allowlists, DNS-pinning proxy, limits and write gating.
+- `upload_attachment`, `list_attachments`, and on-demand `read_attachment`, with image
+  tiling, PDF previews, and text pagination through the calling Odoo account.
+- Optional capture Docker overlay, Chromium seccomp profile, and deployment guide.
+
 ### Changed
 - **FastMCP floor raised to `fastmcp[tasks]>=4.1.5,<5`** (was `>=4.0.10`), the version a fresh
   install resolves to and the suite is run against.

@@ -39,6 +39,12 @@ Homepage = "https://github.com/AlanOgic/odoo-mcp-19"
 Issues = "https://github.com/AlanOgic/odoo-mcp-19/issues"
 
 [project.optional-dependencies]
+capture = [
+    "playwright>=1.51,<2",
+    "pillow>=10.4",
+    "pymupdf>=1.24,<2",
+    "markdownify>=0.13,<2",
+]
 dev = [
     "black>=24.0",
     "isort>=5.13",

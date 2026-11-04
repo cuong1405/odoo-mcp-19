@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+ARG INSTALL_CAPTURE=false
+
 WORKDIR /app
 
 # Create non-root user early for layer caching
@@ -21,9 +23,18 @@ COPY pyproject.toml README.md ./
 # the stub's empty __init__.py (newer than the COPY'd source) and ship that.
 RUN mkdir -p src/odoo_mcp \
     && touch src/odoo_mcp/__init__.py \
-    && pip install --no-cache-dir . \
+    && if [ "$INSTALL_CAPTURE" = "true" ]; then pip install --no-cache-dir '.[capture]'; else pip install --no-cache-dir .; fi \
     && pip uninstall --yes odoo-mcp-19 \
     && rm -rf src build
+
+# Optional browser layer. Chromium stays sandboxed at runtime under UID 1001.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN if [ "$INSTALL_CAPTURE" = "true" ]; then \
+        python -m playwright install --with-deps chromium \
+        && apt-get update && apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-cjk \
+        && rm -rf /var/lib/apt/lists/* \
+        && chmod -R a+rX /opt/playwright; \
+    fi
 
 # Copy source and install the local package; dependencies are already resolved
 # above, so --no-deps keeps this layer cheap without weakening any constraint.

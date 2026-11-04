@@ -11,6 +11,7 @@ MCP 2025-11-25 Features:
 """
 
 import asyncio
+import base64
 import functools
 import hashlib
 import json
@@ -20,16 +21,23 @@ import secrets
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, TypeVar
+from typing import Any, Callable, Dict, List, Literal, TypeVar
 
 import anyio
 from fastmcp import Context
 from fastmcp.dependencies import Progress
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
+from pydantic import SecretStr, ValidationError
 
 from . import prompts as _prompts  # noqa: F401 -- import triggers prompt registration
 from . import resources as _resources  # noqa: F401 -- import triggers resource registration
 from .app import ODOO_ICON, mcp  # noqa: F401 -- mcp import triggers FastMCP setup
 from .arg_mapping import convert_args_to_v2
+from .attachment_content import METADATA_FIELDS, TEXT_MIMETYPES, preview_content
+from .attachments import attachment_values
+from .capture import CaptureRequest, Viewport, run_capture
+from .capture_policy import CaptureError, CapturePolicy, safe_url
 from .constants import (
     _READ_RESOURCE_MAX_CHARS,
     COMPACT_FIELD_ATTRIBUTES,
@@ -698,6 +706,296 @@ def execute_method(
         if method == "search_read" and ("500" in error_msg or "Internal Server Error" in error_msg):
             return _search_read_fallback(odoo, model, kwargs, error_msg, start_time)
         return _failure_response(model, method, error_msg, start_time)
+
+
+@mcp.tool(
+    description=(
+        "Store a screenshot or workflow file as a non-public Odoo ir.attachment. "
+        "Accepts standard base64 bytes (maximum 25 MiB decoded), including Playwright screenshot bytes. "
+        "Optionally link to res_model/res_id and describe the workflow or source URL. "
+        "Uses the same safety gate as execute_method: repeat identical inputs with confirmed=true "
+        "and the returned confirmation_token when requested. Returns create's attachment ID list; "
+        "authenticated download: /web/content/<id>?download=true. "
+        "Capture screenshots in the caller's browser; this tool uploads bytes and does not browse URLs."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+)
+def upload_attachment(
+    ctx: Context,
+    name: str,
+    content_base64: str,
+    mimetype: str | None = None,
+    res_model: str | None = None,
+    res_id: int | None = None,
+    description: str | None = None,
+    confirmed: bool = False,
+    confirmation_token: str | None = None,
+) -> ExecuteMethodResponse:
+    """Upload portable artifact bytes using the standard per-user Odoo execution path."""
+    try:
+        vals = attachment_values(name, content_base64, mimetype, res_model, res_id, description)
+    except ValueError as exc:
+        return ExecuteMethodResponse(success=False, error=str(exc))
+    return execute_method(
+        ctx=ctx,
+        model="ir.attachment",
+        method="create",
+        kwargs_json=json.dumps({"vals_list": [vals]}),
+        confirmed=confirmed,
+        confirmation_token=confirmation_token,
+    )
+
+
+@mcp.tool(
+    description=(
+        "Capture a webpage on the server using Playwright and save it in Odoo ir.attachment. "
+        "Returns attachment ID and metadata only; never returns screenshot bytes. Use read_attachment "
+        "explicitly when the user wants to view it. Capture is restricted to configured hosts. "
+        "Requires the optional capture extra and sandboxed Chromium. In strict mode repeat identical "
+        "inputs with confirmed=true and the returned confirmation_token. Cookies accept name/value "
+        "pairs only; headers and cookies are ephemeral and scoped to the source site. "
+        "Captured URLs omit query strings from stored metadata. Non-2xx pages are still captured."
+    ),
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
+)
+def capture_page(
+    ctx: Context,
+    url: str,
+    format: Literal["png", "jpeg", "pdf", "html", "text", "md"] = "png",
+    full_page: bool = True,
+    viewport: Viewport | None = None,
+    device_scale_factor: float = 1,
+    wait_until: Literal["load", "domcontentloaded", "networkidle"] = "networkidle",
+    wait_for_selector: str | None = None,
+    extra_delay_ms: int = 0,
+    color_scheme: Literal["light", "dark"] | None = None,
+    selector: str | None = None,
+    cookies: list[dict[str, SecretStr]] | None = None,
+    headers: dict[str, SecretStr] | None = None,
+    res_model: str | None = None,
+    res_id: int | None = None,
+    name: str | None = None,
+    confirmed: bool = False,
+    confirmation_token: str | None = None,
+) -> ExecuteMethodResponse:
+    """Gate capture before network access and create through the caller's Odoo client."""
+    started = time.time()
+    if get_profile().read_only:
+        return ExecuteMethodResponse(success=False, error=_read_only_error("capture creates an attachment"))
+    try:
+        policy = CapturePolicy.from_env()
+        request = CaptureRequest(
+            url=url,
+            format=format,
+            full_page=full_page,
+            viewport=viewport or Viewport(),
+            device_scale_factor=device_scale_factor,
+            wait_until=wait_until,
+            wait_for_selector=wait_for_selector,
+            extra_delay_ms=extra_delay_ms,
+            color_scheme=color_scheme,
+            selector=selector,
+            cookies=cookies or [],
+            headers=headers or {},
+        )
+        policy.validate_url(url)
+        filename = name if name is not None else f"capture.{ {'text': 'txt'}.get(format, format)}"
+        # Synthetic bytes allow normal schema/classifier checks BEFORE rendering. Only the
+        # digest is bound into confirmation state; secrets never enter descriptions or logs.
+        template = attachment_values(filename, "Y2FwdHVyZQ==", None, res_model, res_id, "Page capture")
+        odoo = get_odoo_client()
+        identity = hashlib.sha256(f"{odoo.url}\0{odoo.username}".encode()).hexdigest()
+        template["description"] = json.dumps({"capture_digest": request.digest(), "identity": identity})
+        _, kwargs, parse_error = _parse_json_args(None, json.dumps({"vals_list": [template]}))
+        if parse_error:
+            raise CaptureError("Invalid default Odoo context")
+        gated, classification = _classify_and_gate(
+            odoo, "ir.attachment", "create", [], kwargs, confirmed, confirmation_token, started
+        )
+        if gated:
+            if gated.hint:
+                gated.hint = gated.hint.replace("Re-call execute_method", "Re-call capture_page with identical inputs")
+            return gated
+        captured = run_capture(request, policy, identity)
+        description = json.dumps(
+            {
+                "source_url": safe_url(url),
+                "url_final": captured["url_final"],
+                "captured_at": captured["captured_at"],
+                "viewport": request.viewport.model_dump(),
+                "device_scale_factor": device_scale_factor,
+                "http_status": captured["http_status"],
+            },
+            ensure_ascii=False,
+        )
+        # Include storage metadata in token binding as well as browser inputs.
+        vals = attachment_values(
+            filename, captured["content_base64"], captured["mimetype"], res_model, res_id, description
+        )
+        kwargs["vals_list"] = [vals]
+        ids = odoo.execute_method("ir.attachment", "create", **kwargs)
+        if not isinstance(ids, list) or len(ids) != 1 or type(ids[0]) is not int:
+            return ExecuteMethodResponse(success=False, error="Odoo returned an unexpected attachment ID result")
+        metadata = {key: value for key, value in captured.items() if key not in {"content_base64", "success"}}
+        metadata.update(attachment_id=ids[0], name=filename, res_model=res_model, res_id=res_id)
+        # Odoo may resize images or normalize MIME types. Report stored metadata
+        # without fetching file bytes.
+        try:
+            stored = odoo.execute_method(
+                "ir.attachment",
+                "read",
+                ids=ids,
+                fields=["name", "mimetype", "file_size"],
+                context=kwargs.get("context") or {},
+            )[0]
+            metadata.update(name=stored["name"], mimetype=stored["mimetype"], size=stored["file_size"])
+        except Exception:
+            # Create already committed: avoid reporting failure and inviting duplicates.
+            metadata["size"] = None
+            metadata["note"] = "Attachment created; stored metadata unavailable. Use list_attachments to inspect it."
+        return ExecuteMethodResponse(
+            success=True, result=metadata, safety=classification, execution_time_ms=_elapsed_ms(started)
+        )
+    except ValidationError:
+        return ExecuteMethodResponse(
+            success=False, error="Invalid capture inputs; check viewport, credentials and limits"
+        )
+    except (CaptureError, ValueError) as exc:
+        # Validation errors are safe; Odoo/network exceptions must not echo payloads or page secrets.
+        if isinstance(exc, CaptureError):
+            return ExecuteMethodResponse(success=False, error=str(exc))
+        return ExecuteMethodResponse(success=False, error="Capture inputs or Odoo attachment operation failed")
+    except Exception:
+        return ExecuteMethodResponse(
+            success=False, error="Capture or attachment storage failed; check server configuration"
+        )
+
+
+@mcp.tool(
+    description="Find Odoo attachments by record, filename or MIME type. Returns metadata only, never file bytes.",
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
+def list_attachments(
+    ctx: Context,
+    res_model: str | None = None,
+    res_id: int | None = None,
+    name_contains: str | None = None,
+    mimetype: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    order: Literal["newest", "oldest", "name"] = "newest",
+) -> ExecuteMethodResponse:
+    """Use ordinary ORM metadata reads so ACLs and record rules remain authoritative."""
+    if not 1 <= limit <= 100 or offset < 0:
+        return ExecuteMethodResponse(success=False, error="limit must be 1..100 and offset must be nonnegative")
+    if res_model is not None and _validate_model(res_model):
+        return ExecuteMethodResponse(success=False, error="Invalid res_model")
+    if res_id is not None and (not res_model or res_id <= 0):
+        return ExecuteMethodResponse(success=False, error="res_id requires res_model and a positive integer")
+    domain = [
+        [key, operator, value]
+        for key, operator, value in (
+            ("res_model", "=", res_model),
+            ("res_id", "=", res_id),
+            ("name", "ilike", name_contains),
+            ("mimetype", "=", mimetype),
+        )
+        if value is not None
+    ]
+    return execute_method(
+        ctx,
+        "ir.attachment",
+        "search_read",
+        kwargs_json=json.dumps(
+            {
+                "domain": domain,
+                "fields": METADATA_FIELDS,
+                "limit": limit,
+                "offset": offset,
+                "order": {
+                    "newest": "create_date desc, id desc",
+                    "oldest": "create_date asc, id asc",
+                    "name": "name, id",
+                }[order],
+            }
+        ),
+    )
+
+
+@mcp.tool(
+    description=(
+        "Explicitly read an Odoo attachment on demand. Returns images as MCP image content, text as paginated "
+        "untrusted data, PDF text by one-based page and optionally up to two rendered page images. "
+        "Tall images use zero-based tile indexes; inspect tile_count for more. Max 25 MiB input, "
+        "1568px image preview edge, 2 MiB per image, 30000 text characters. Unsupported files return metadata only."
+    ),
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
+def read_attachment(
+    ctx: Context,
+    attachment_id: int,
+    tile: int = 0,
+    page: int = 1,
+    offset: int = 0,
+    max_chars: int = 12000,
+    render_pages: list[int] | None = None,
+) -> ToolResult:
+    """Read metadata first, then bytes only when a supported preview was explicitly requested."""
+
+    def result(payload, images=None, error=False):
+        return ToolResult(
+            content=[TextContent(type="text", text=json.dumps(payload, ensure_ascii=False)), *(images or [])],
+            is_error=error,
+        )
+
+    if attachment_id <= 0 or tile < 0 or page < 1 or offset < 0 or not 1 <= max_chars <= 30000:
+        return result({"success": False, "error": "Invalid attachment ID, tile, page, offset or max_chars"}, error=True)
+    if render_pages and (len(render_pages) > 2 or any(number < 1 for number in render_pages)):
+        return result({"success": False, "error": "render_pages accepts up to two positive page numbers"}, error=True)
+    try:
+        odoo = get_odoo_client()
+        context = _merge_context({}) or {}
+        rows = odoo.execute_method(
+            "ir.attachment", "read", ids=[attachment_id], fields=METADATA_FIELDS, context=context
+        )
+        if not rows:
+            raise CaptureError("Attachment not found or inaccessible")
+        metadata = rows[0]
+        mimetype = metadata.get("mimetype") or ""
+        if metadata.get("type") == "url" or not (
+            mimetype.startswith(("image/", "text/")) or mimetype in TEXT_MIMETYPES or mimetype == "application/pdf"
+        ):
+            return result(
+                {
+                    "success": True,
+                    "metadata": metadata,
+                    "supported": False,
+                    "note": "Preview unsupported; metadata only. URL attachments are never fetched.",
+                }
+            )
+        max_bytes = CapturePolicy.from_env().max_bytes
+        if not 0 < metadata.get("file_size", 0) <= max_bytes:
+            raise CaptureError("Attachment is empty or exceeds the configured preview byte limit")
+        rows = odoo.execute_method(
+            "ir.attachment", "read", ids=[attachment_id], fields=["datas"], context={**context, "bin_size": False}
+        )
+        encoded = rows[0].get("datas") if rows else None
+        if not isinstance(encoded, str) or len(encoded) > 4 * ((max_bytes + 2) // 3):
+            raise CaptureError("Attachment bytes are missing or exceed the configured size limit")
+        data = base64.b64decode(encoded, validate=True)
+        if len(data) > max_bytes:
+            raise CaptureError("Attachment exceeds the configured preview byte limit")
+        payload, images = preview_content(
+            metadata, data, tile=tile, page=page, offset=offset, max_chars=max_chars, render_pages=render_pages
+        )
+        return result(payload, images)
+    except CaptureError as exc:
+        return result({"success": False, "error": str(exc)}, error=True)
+    except Exception:
+        return result(
+            {"success": False, "error": "Attachment unavailable, access denied, or content could not be decoded"},
+            error=True,
+        )
 
 
 # ----- batch_execute phases -----

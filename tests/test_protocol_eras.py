@@ -18,7 +18,15 @@ from odoo_mcp.app import mcp
 
 MODERN = "2026-07-28"
 LEGACY = "2025-11-25"
-TOOLS = {"execute_method", "batch_execute", "read_resource"}
+TOOLS = {
+    "execute_method",
+    "batch_execute",
+    "read_resource",
+    "upload_attachment",
+    "capture_page",
+    "list_attachments",
+    "read_attachment",
+}
 FIELDS = {"name": {"type": "char", "string": "Name"}}
 
 

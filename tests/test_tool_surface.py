@@ -1,4 +1,4 @@
-"""The server publishes three tools: execute_method, batch_execute and read_resource.
+"""Pin the published tool surface, including workflow artifact uploads.
 
 ``execute_workflow`` ran two hard-coded workflows, ``lead_to_won`` and
 ``create_and_post_invoice``, and both were wrong against Odoo 19 JSON-2: the
@@ -25,7 +25,15 @@ def _published_tools():
 
 
 def test_the_published_tools_are_execute_method_batch_execute_and_read_resource():
-    assert {tool.name for tool in _published_tools()} == {"execute_method", "batch_execute", "read_resource"}
+    assert {tool.name for tool in _published_tools()} == {
+        "execute_method",
+        "batch_execute",
+        "read_resource",
+        "upload_attachment",
+        "capture_page",
+        "list_attachments",
+        "read_attachment",
+    }
 
 
 def test_the_tool_registry_resource_does_not_offer_the_removed_tool():

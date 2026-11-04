@@ -38,7 +38,7 @@ layer blocks every non-safe method.
 
 | | |
 |---|---|
-| **3 tools** | `execute_method` reaches any method on any model; `batch_execute` and `read_resource` cover the rest |
+| **7 tools** | Universal model access, batches, resource discovery, and screenshot/file attachments |
 | **38 resources** | Model discovery, compact schemas, state-machine workflows, introspection, API reference (`odoo://api/*`), and runtime posture (`odoo://server-status`) |
 | **12 prompts** | Generic guided workflows (aging reports, inventory checks, domain building, pagination, …) |
 | **Safety layer** | Risk classification before execution, 8 blocked models, 6 sensitive models, cascade warnings |
@@ -266,13 +266,62 @@ token issued for `unlink([1])` and reuse it on `unlink([1, 2, …, 1000])`.
 
 ## Architecture
 
-### Tools (3)
+### Tools (7)
 
 | Tool | Purpose |
 |------|---------|
 | `execute_method` | Call any method on any Odoo model |
 | `batch_execute` | Multiple operations with progress tracking |
 | `read_resource` | Read any `odoo://` resource by URI |
+| `upload_attachment` | Store file bytes as a non-public Odoo attachment |
+| `capture_page` | Capture a URL on the server and return stored attachment metadata |
+| `list_attachments` | Find attachment metadata without fetching file bytes |
+| `read_attachment` | Explicitly retrieve an image tile, text, or PDF preview |
+
+#### Server-side screenshots and workflow files
+
+Install the optional capture dependencies and Chromium on the MCP server:
+
+```bash
+pip install -e '.[capture]'
+python -m playwright install --with-deps chromium
+```
+
+Run as a non-root user with Chromium sandbox support, or use the optional
+`docker-compose.capture.yml` overlay. The default permitted destinations are
+`*.leonix.cc`; add asset/CDN hosts explicitly if the page needs them.
+
+```python
+# Run through your connected MCP client. Strict mode first returns a confirmation token.
+await client.call_tool("capture_page", {
+    "url": "https://leonix-krabby.greeni.leonix.cc/homepage-1",
+    "name": "homepage-after.png",
+    "wait_until": "domcontentloaded",
+    # Optional: "res_model": "website.page", "res_id": 42,
+})
+```
+
+`capture_page` renders on the server, stores a non-public `ir.attachment`, and
+returns its ID and metadata **without sending the screenshot to the conversation**.
+It supports PNG, JPEG, PDF, HTML, text, and Markdown. In strict mode, approve and
+repeat identical inputs with `confirmed=true` and the token from `hint`.
+
+Use `list_attachments` to find artifacts without fetching their bytes. Call
+`read_attachment(attachment_id=123)` explicitly when you want the content in the
+conversation. Tall screenshots return one readable tile; use the returned
+`tile_count` and zero-based `tile` to request others. PDFs provide text by page
+and optionally rendered page images. Text previews provide `next_offset`.
+
+`upload_attachment` also stores existing file bytes using standard base64
+(`content_base64`, maximum 25 MiB). It does not read the server's filesystem.
+All creates and reads use the caller's Odoo account and existing safety rules.
+Attachments stay unlinked unless `res_model` and `res_id` are provided together;
+normal Odoo image resizing and attachment processing remain enabled, and
+there is no automatic deletion. Authorized Odoo users can download the original
+at `/web/content/<id>?download=true`.
+
+See [Page capture and attachment tools](docs/page-capture.md) for parameters,
+security policy, deployment, and examples.
 
 ### Resources (38)
 
@@ -596,7 +645,7 @@ Full documentation lives in the **[Wiki](https://github.com/AlanOgic/odoo-mcp-19
 **Start here**
 
 - [Getting started](https://github.com/AlanOgic/odoo-mcp-19/wiki/Getting-Started) — install and connect in five minutes
-- [Tools](https://github.com/AlanOgic/odoo-mcp-19/wiki/Tools) — the 3 tools, their parameters, and when to reach for each
+- [Tools](https://github.com/AlanOgic/odoo-mcp-19/wiki/Tools) — the 7 tools, their parameters, and when to reach for each
 - [Resources](https://github.com/AlanOgic/odoo-mcp-19/wiki/Resources) — the 27 `odoo://` discovery URIs
 
 **Reference**

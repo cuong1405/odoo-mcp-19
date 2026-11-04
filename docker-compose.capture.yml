@@ -1,0 +1,20 @@
+# docker compose -f docker-compose.yml -f docker-compose.capture.yml up -d --build
+services:
+  odoo-mcp:
+    build:
+      context: .
+      args:
+        INSTALL_CAPTURE: "true"
+    init: true
+    shm_size: 1gb
+    security_opt:
+      - seccomp=./docker/chromium-seccomp.json
+    environment:
+      - MCP_CAPTURE_ALLOWED_HOSTS=${MCP_CAPTURE_ALLOWED_HOSTS:-*.leonix.cc}
+      - MCP_CAPTURE_PRIVATE_HOSTS=${MCP_CAPTURE_PRIVATE_HOSTS:-}
+      - MCP_CAPTURE_CONCURRENCY=${MCP_CAPTURE_CONCURRENCY:-2}
+      - MCP_CAPTURE_HOURLY_LIMIT=${MCP_CAPTURE_HOURLY_LIMIT:-60}
+      - MCP_CAPTURE_TIMEOUT=${MCP_CAPTURE_TIMEOUT:-60}
+      - MCP_CAPTURE_NAVIGATION_TIMEOUT=${MCP_CAPTURE_NAVIGATION_TIMEOUT:-30}
+      - MCP_CAPTURE_MAX_BYTES=${MCP_CAPTURE_MAX_BYTES:-26214400}
+      - MCP_CAPTURE_MAX_HEIGHT=${MCP_CAPTURE_MAX_HEIGHT:-20000}
