@@ -291,6 +291,11 @@ Run as a non-root user with Chromium sandbox support, or use the optional
 `docker-compose.capture.yml` overlay. The default permitted destinations are
 `*.leonix.cc`; add asset/CDN hosts explicitly if the page needs them.
 
+For a Coolify Docker Compose Service, paste [docker-compose.coolify.yml](docker-compose.coolify.yml)
+into the existing Service's Compose editor. It includes the OAuth proxy and
+automatically provisions the Chromium seccomp profile through Coolify managed
+files. No manual host installation is needed. See the [Coolify instructions](docs/page-capture.md#coolify-with-automatic-profile-provisioning).
+
 ```python
 # Run through your connected MCP client. Strict mode first returns a confirmation token.
 await client.call_tool("capture_page", {

@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Coolify Compose template with automatic Chromium seccomp profile provisioning
+  through managed files, plus a standard-library generator supporting pinned Git refs.
 - Server-side `capture_page` stores PNG/JPEG/PDF/HTML/text/Markdown in non-public
   `ir.attachment` records and returns metadata only. Optional Playwright worker with
   sandboxed Chromium, destination allowlists, DNS-pinning proxy, limits and write gating.

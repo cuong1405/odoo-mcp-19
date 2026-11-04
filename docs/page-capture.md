@@ -37,6 +37,50 @@ namespaces. Chromium is launched with `chromium_sandbox=True`; startup fails
 clearly if the sandbox is unavailable. There is no automatic unsafe fallback.
 See [Playwright's Docker guidance](https://playwright.dev/python/docs/docker).
 
+### Coolify with automatic profile provisioning
+
+For an existing Coolify **Docker Compose Service** with the OAuth proxy, paste
+[`docker-compose.coolify.yml`](../docker-compose.coolify.yml) into its Compose
+editor, save, and redeploy. Keep the existing environment variables and Service
+resource so the `oauth-data` volume and public endpoints remain associated with
+the same stack. This template builds the fork's `master` branch with capture
+enabled and preserves the `mcp`/`oauth` service names.
+
+The template embeds the vendored seccomp JSON as a Coolify managed configuration
+file (`volumes[].content`). Coolify writes `./chromium-seccomp.json` under the
+Service configuration directory before Docker starts the container. The
+`security_opt` references that same file. The read-only container mount lets
+Coolify manage the host file; the MCP process does not install or modify it.
+No manual host download, privileged installer container, or Docker socket mount
+is required. See [Coolify managed files](https://coolify.io/docs/services/configuration/persistent-storage).
+
+To generate a template pinned to a release or full commit hash:
+
+```bash
+python3 scripts/generate_coolify_compose.py --ref <full-commit-hash> --output coolify-pinned.yml
+```
+
+The generator uses only Python's standard library. The checked-in template is
+generated from `docker/chromium-seccomp.json`; regenerate it whenever that
+profile changes, and check consistency with:
+
+```bash
+python3 scripts/generate_coolify_compose.py --output docker-compose.coolify.yml
+python3 scripts/generate_coolify_compose.py --check
+```
+
+This template is **Coolify-specific**: its managed-file `content` extension must
+be processed by Coolify. For plain Docker Compose, use the existing capture
+overlay from a local checkout instead. The host must still permit Chromium's
+user namespaces; provisioning the seccomp file cannot change host kernel or
+AppArmor policies.
+
+The seccomp profile is a browser-sandbox compatibility setting: Docker's default
+policy can block the namespace operations needed by sandboxed Chromium.
+It is not needed for uploads, attachment reads, or ordinary Odoo operations.
+Docker applies this policy before starting the container, so copying it into a
+Dockerfile or running an MCP entrypoint script cannot apply it to that container.
+
 The base install still works without the capture extra. Image/PDF previews and
 capture require their respective optional dependencies; uploads, metadata lists,
 and text reads work without a browser. An approved capture attempt without a
