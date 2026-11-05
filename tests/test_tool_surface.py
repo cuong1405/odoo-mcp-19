@@ -52,3 +52,13 @@ def test_nothing_the_package_ships_names_the_removed_tool():
 
     assert shipped, "package files not found: the assertion below would pass vacuously"
     assert [str(p.relative_to(package)) for p in shipped if REMOVED_TOOL in p.read_text(encoding="utf-8")] == []
+
+
+def test_capture_tool_teaches_coordinate_cropping():
+    tool = next(tool for tool in _published_tools() if tool.name == "capture_page")
+    schema = tool.parameters
+    assert "clip" in schema["properties"]
+    assert "selector" not in schema["properties"]
+    assert "wait_for_selector" in schema["properties"]
+    assert "CSS pixels" in tool.description
+    assert "clip={x:0,y:800,width:1440,height:600}" in tool.description

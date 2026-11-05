@@ -306,6 +306,11 @@ await client.call_tool("capture_page", {
 })
 ```
 
+For a section screenshot, pass `"clip": {"x": 0, "y": 800, "width": 1440, "height": 600}`
+with PNG or JPEG. Coordinates are page-relative CSS pixels; clip overrides
+`full_page` and replaces selector cropping. Keep the same viewport as your overview.
+The tool's MCP description and input schema explain this syntax to agents.
+
 `capture_page` renders on the server, stores a non-public `ir.attachment`, and
 returns its ID and metadata **without sending the screenshot to the conversation**.
 It supports PNG, JPEG, PDF, HTML, text, and Markdown. In strict mode, approve and

@@ -24,6 +24,16 @@ class Viewport(BaseModel):
     height: int = Field(default=900, ge=240, le=2160)
 
 
+class CaptureClip(BaseModel):
+    """Rectangle in CSS pixels from the document top-left."""
+
+    model_config = ConfigDict(extra="forbid")
+    x: float = Field(ge=0, allow_inf_nan=False, description="Page horizontal offset in CSS pixels")
+    y: float = Field(ge=0, allow_inf_nan=False, description="Page vertical offset in CSS pixels")
+    width: float = Field(gt=0, le=4096, allow_inf_nan=False)
+    height: float = Field(gt=0, allow_inf_nan=False)
+
+
 class CaptureRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str = Field(max_length=8192)
@@ -35,13 +45,15 @@ class CaptureRequest(BaseModel):
     wait_for_selector: str | None = Field(default=None, max_length=1024)
     extra_delay_ms: int = Field(default=0, ge=0, le=10000)
     color_scheme: Literal["light", "dark"] | None = None
-    selector: str | None = Field(default=None, max_length=1024)
+    clip: CaptureClip | None = None
     # SecretStr prevents validation/repr from revealing values. Worker input uses explicit extraction.
     headers: dict[str, SecretStr] = Field(default_factory=dict)
     cookies: list[dict[str, SecretStr]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_credentials(self):
+        if self.clip is not None and self.format not in {"png", "jpeg"}:
+            raise ValueError("clip is supported only for PNG and JPEG screenshots")
         if len(self.headers) > 20 or len(self.cookies) > 30:
             raise ValueError("Too many capture headers or cookies")
         for key, value in self.headers.items():

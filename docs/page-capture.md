@@ -102,7 +102,7 @@ working browser returns an installation/sandbox error and creates no attachment.
 | `wait_for_selector` | Optional visible element to wait for |
 | `extra_delay_ms` | 0; maximum 10000 |
 | `color_scheme` | `light` or `dark`; light if omitted |
-| `selector` | Optional element screenshot/HTML/text/Markdown; PDF uses the full page |
+| `clip` | Optional `{x, y, width, height}` rectangle in page CSS pixels; PNG/JPEG only; overrides `full_page` |
 | `cookies` | Optional `[{"name":"session_id","value":"..."}]`; source-host scope only |
 | `headers` | Optional request header map; restricted headers are refused |
 | `res_model`, `res_id` | Supply together to link to an existing Odoo record; otherwise unlinked |
@@ -223,7 +223,7 @@ and process cleanup. At most 16 requests wait for a worker. The process group is
 killed at the total deadline. Rate/concurrency state is process-local and resets
 on restart; multiple MCP replicas need an external shared limiter for global
 quotas. Captures also have a 4096px width and 60 megapixel bound. Oversized pages
-fail clearly; select an element, reduce scale, or set `full_page=false`.
+fail clearly; use clip, reduce scale, or set `full_page=false`.
 
 Writes honor existing readonly roles, `MCP_READ_ONLY`, `MCP_WRITE_ALLOWLIST`
 (`ir.attachment.create`), locked-mode schema validation and confirmation rules.
@@ -246,3 +246,17 @@ skip when those optional packages are absent. Live capture requires installed
 Chromium and a host permitting its sandbox. A live Odoo test additionally
 requires a designated development account/database; ordinary unit tests never
 write attachments to a live instance.
+
+### Section screenshots
+
+Use `"clip": {"x": 0, "y": 800, "width": 1440, "height": 600}` with
+`"format": "png"` or `"jpeg"`. This replaces `selector` cropping;
+`wait_for_selector` remains available for waiting only. Omit clip for normal capture.
+Coordinates use CSS pixels from the document top-left, independent of device scale.
+The rectangle must fit within the document and existing dimension/megapixel limits.
+Offsets must be finite and nonnegative; dimensions must be finite and positive.
+PDF/HTML/text/Markdown reject clip. Clip overrides full_page.
+
+The MCP tool description and schema teach agents this syntax: capture an overview,
+then a section using the same viewport. Undo preview scaling and add tile offsets
+before converting preview coordinates to page CSS pixels.

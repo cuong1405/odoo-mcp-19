@@ -36,7 +36,7 @@ from .app import ODOO_ICON, mcp  # noqa: F401 -- mcp import triggers FastMCP set
 from .arg_mapping import convert_args_to_v2
 from .attachment_content import METADATA_FIELDS, TEXT_MIMETYPES, preview_content
 from .attachments import attachment_values
-from .capture import CaptureRequest, Viewport, run_capture
+from .capture import CaptureClip, CaptureRequest, Viewport, run_capture
 from .capture_policy import CaptureError, CapturePolicy, safe_url
 from .constants import (
     _READ_RESOURCE_MAX_CHARS,
@@ -754,7 +754,13 @@ def upload_attachment(
         "Requires the optional capture extra and sandboxed Chromium. In strict mode repeat identical "
         "inputs with confirmed=true and the returned confirmation_token. Cookies accept name/value "
         "pairs only; headers and cookies are ephemeral and scoped to the source site. "
-        "Captured URLs omit query strings from stored metadata. Non-2xx pages are still captured."
+        "Captured URLs omit query strings from stored metadata. Non-2xx pages are still captured. "
+        "For section screenshots use clip={x:0,y:800,width:1440,height:600}, PNG/JPEG only. "
+        "Coordinates are CSS pixels from the document top-left, not viewport or preview pixels. "
+        "clip overrides full_page and must fit within the page. Selector cropping has been removed. "
+        "First capture an overview, then capture a rectangle using the same viewport. Convert scaled "
+        "preview coordinates back to CSS pixels and add any tile offset before selecting the rectangle. "
+        "device_scale_factor changes resolution, not clip coordinates."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
 )
@@ -769,7 +775,7 @@ def capture_page(
     wait_for_selector: str | None = None,
     extra_delay_ms: int = 0,
     color_scheme: Literal["light", "dark"] | None = None,
-    selector: str | None = None,
+    clip: CaptureClip | None = None,
     cookies: list[dict[str, SecretStr]] | None = None,
     headers: dict[str, SecretStr] | None = None,
     res_model: str | None = None,
@@ -794,7 +800,7 @@ def capture_page(
             wait_for_selector=wait_for_selector,
             extra_delay_ms=extra_delay_ms,
             color_scheme=color_scheme,
-            selector=selector,
+            clip=clip,
             cookies=cookies or [],
             headers=headers or {},
         )
@@ -824,6 +830,7 @@ def capture_page(
                 "captured_at": captured["captured_at"],
                 "viewport": request.viewport.model_dump(),
                 "device_scale_factor": device_scale_factor,
+                "clip": request.clip.model_dump() if request.clip else None,
                 "http_status": captured["http_status"],
             },
             ensure_ascii=False,
@@ -858,7 +865,11 @@ def capture_page(
         )
     except ValidationError:
         return ExecuteMethodResponse(
-            success=False, error="Invalid capture inputs; check viewport, credentials and limits"
+            success=False,
+            error=(
+                "Invalid capture inputs; check clip (PNG/JPEG only, finite nonnegative x/y, "
+                "positive width/height), viewport, credentials and limits"
+            ),
         )
     except (CaptureError, ValueError) as exc:
         # Validation errors are safe; Odoo/network exceptions must not echo payloads or page secrets.

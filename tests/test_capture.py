@@ -255,3 +255,90 @@ def test_text_like_files_preview_as_untrusted_text(mime):
     result, images = preview_content(metadata(mime), b"hello", max_chars=3)
     assert result["text"].startswith("hel") and result["next_offset"] == 3
     assert not images
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("x", -1), ("y", -1), ("width", 0), ("height", 0), ("x", float("nan")), ("height", float("inf")), ("width", 4097)],
+)
+def test_invalid_clip(field, value):
+    clip = dict(x=0, y=800, width=1440, height=600)
+    clip[field] = value
+    with pytest.raises(ValueError):
+        CaptureRequest(url="https://test.leonix.cc", clip=clip)
+
+
+@pytest.mark.parametrize("fmt", ["pdf", "html", "text", "md"])
+def test_clip_rejects_non_image_formats(fmt):
+    with pytest.raises(ValueError, match="PNG and JPEG"):
+        CaptureRequest(url="https://test.leonix.cc", format=fmt, clip=dict(x=0, y=0, width=100, height=100))
+
+
+def test_selector_cropping_removed():
+    with pytest.raises(ValueError):
+        CaptureRequest(url="https://test.leonix.cc", selector="section")
+
+
+def test_clip_is_bound_to_confirmation(stub):
+    from odoo_mcp.capture import CaptureClip
+
+    args = dict(
+        ctx=MagicMock(), url="https://test.leonix.cc/page", clip=CaptureClip(x=0, y=800, width=1440, height=600)
+    )
+    with patch.object(server, "run_capture") as worker:
+        first = server.capture_page(**args)
+        args["clip"] = CaptureClip(x=0, y=900, width=1440, height=600)
+        result = server.capture_page(**args, confirmed=True, confirmation_token=token(first))
+        assert not result.success
+        worker.assert_not_called()
+
+
+@pytest.mark.parametrize("fmt", ["png", "jpeg"])
+@pytest.mark.parametrize(
+    "clip,error",
+    [
+        (dict(x=20, y=1800, width=600, height=400), None),
+        (dict(x=20, y=2800, width=600, height=400), "fit within"),
+        (dict(x=1400, y=0, width=600, height=400), "fit within"),
+        (dict(x=0, y=0, width=600, height=50000), "dimensions"),
+    ],
+)
+def test_worker_uses_page_relative_clip(fmt, clip, error):
+    import asyncio
+    from contextlib import nullcontext
+    from unittest.mock import AsyncMock
+
+    from odoo_mcp.capture_worker import render
+
+    request = CaptureRequest(url="https://test.leonix.cc", format=fmt, clip=clip).worker_payload()
+    page = MagicMock(url=request["url"])
+    page.goto = AsyncMock(return_value=MagicMock(status=200))
+    page.evaluate = AsyncMock(return_value=dict(width=1440, height=3000))
+    page.screenshot = AsyncMock(return_value=b"image")
+    page.title = AsyncMock(return_value="Test")
+    context = MagicMock()
+    context.new_page = AsyncMock(return_value=page)
+    context.route = AsyncMock()
+    context.route_web_socket = AsyncMock()
+    browser = MagicMock()
+    browser.new_context = AsyncMock(return_value=context)
+    browser.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.chromium.launch = AsyncMock(return_value=browser)
+    manager = MagicMock()
+    manager.__aenter__ = AsyncMock(return_value=playwright)
+    manager.__aexit__ = AsyncMock(return_value=False)
+    proxy = MagicMock(server_address=("127.0.0.1", 1234), blocked=False)
+    with (
+        patch("playwright.async_api.async_playwright", return_value=manager),
+        patch("odoo_mcp.capture_worker.capture_proxy", return_value=nullcontext(proxy)),
+    ):
+        if error:
+            with pytest.raises(CaptureError, match=error):
+                asyncio.run(render(request, policy()))
+            page.screenshot.assert_not_called()
+            return
+        result = asyncio.run(render(request, policy()))
+    assert result["success"]
+    options = page.screenshot.call_args.kwargs
+    assert options["clip"] == clip and options["full_page"] is False

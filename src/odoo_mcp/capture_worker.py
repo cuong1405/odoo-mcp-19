@@ -95,49 +95,46 @@ async def render(request, policy):
                         height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0),
                         width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0)
                     })""")
-                    if (
-                        not request["selector"]
-                        and request["full_page"]
-                        and (dimensions["height"] > policy.max_height or dimensions["width"] > 4096)
+                    clip = request["clip"]
+                    if clip:
+                        if clip["height"] > policy.max_height or clip["width"] > 4096:
+                            raise CaptureError("Clip exceeds capture dimensions")
+                        if (
+                            clip["x"] + clip["width"] > dimensions["width"]
+                            or clip["y"] + clip["height"] > dimensions["height"]
+                        ):
+                            raise CaptureError("Clip rectangle must fit within the page in CSS pixels")
+                    elif request["full_page"] and (
+                        dimensions["height"] > policy.max_height or dimensions["width"] > 4096
                     ):
-                        raise CaptureError("Page exceeds capture dimensions; use full_page=false or a selector")
-                    target = page.locator(request["selector"]).first if request["selector"] else None
-                    if target:
-                        box = await target.bounding_box()
-                        if not box or box["height"] > policy.max_height or box["width"] > 4096:
-                            raise CaptureError("Selected element is missing or exceeds capture dimensions")
+                        raise CaptureError("Page exceeds capture dimensions; use full_page=false or clip")
                     capture_width = (
-                        box["width"]
-                        if target
+                        clip["width"]
+                        if clip
                         else dimensions["width"] if request["full_page"] else request["viewport"]["width"]
                     )
                     capture_height = (
-                        box["height"]
-                        if target
+                        clip["height"]
+                        if clip
                         else dimensions["height"] if request["full_page"] else request["viewport"]["height"]
                     )
                     if capture_width * capture_height * request["device_scale_factor"] ** 2 > 60_000_000:
-                        raise CaptureError(
-                            "Capture exceeds the 60 megapixel limit; reduce scale, viewport or use a selector"
-                        )
+                        raise CaptureError("Capture exceeds the 60 megapixel limit; reduce scale, viewport or use clip")
                     fmt = request["format"]
                     if fmt in {"png", "jpeg"}:
                         options = {"type": fmt, "animations": "disabled", "timeout": policy.navigation_timeout * 1000}
                         if fmt == "jpeg":
                             options["quality"] = 85
-                        data = (
-                            await target.screenshot(**options)
-                            if target
-                            else await page.screenshot(full_page=request["full_page"], **options)
-                        )
+                        if clip:
+                            data = await page.screenshot(clip=clip, full_page=False, **options)
+                        else:
+                            data = await page.screenshot(full_page=request["full_page"], **options)
                     elif fmt == "pdf":
-                        if target:
-                            raise CaptureError("selector is supported for images, HTML, text and Markdown, not PDF")
                         data = await page.pdf(format="A4", print_background=True)
                     elif fmt == "text":
-                        data = (await (target or page.locator("body")).inner_text()).encode("utf-8")
+                        data = (await page.locator("body").inner_text()).encode("utf-8")
                     else:
-                        html = await target.evaluate("el => el.outerHTML") if target else await page.content()
+                        html = await page.content()
                         if fmt == "md":
                             from markdownify import markdownify
 
