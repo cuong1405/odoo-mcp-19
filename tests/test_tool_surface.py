@@ -31,6 +31,7 @@ def test_the_published_tools_are_execute_method_batch_execute_and_read_resource(
         "read_resource",
         "upload_attachment",
         "capture_page",
+        "measure_page",
         "list_attachments",
         "read_attachment",
     }
@@ -54,11 +55,17 @@ def test_nothing_the_package_ships_names_the_removed_tool():
     assert [str(p.relative_to(package)) for p in shipped if REMOVED_TOOL in p.read_text(encoding="utf-8")] == []
 
 
-def test_capture_tool_teaches_coordinate_cropping():
+def test_capture_tool_requires_measured_section_workflow():
     tool = next(tool for tool in _published_tools() if tool.name == "capture_page")
     schema = tool.parameters
     assert "clip" in schema["properties"]
-    assert "selector" not in schema["properties"]
+    assert "measurement_token" not in schema["properties"]
+    assert "selectors" not in schema["properties"]
     assert "wait_for_selector" in schema["properties"]
-    assert "CSS pixels" in tool.description
-    assert "clip={x:0,y:800,width:1440,height:600}" in tool.description
+    assert "REGION WORKFLOW" in tool.description
+    assert "Never guess" in tool.description
+    assert "measure_page FIRST" in tool.description
+    measure = next(tool for tool in _published_tools() if tool.name == "measure_page")
+    assert "no screenshot is taken" in measure.description
+    assert "ADVISORY" in measure.description
+    assert "selectors" in measure.parameters["properties"]

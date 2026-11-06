@@ -24,6 +24,7 @@ TOOLS = {
     "read_resource",
     "upload_attachment",
     "capture_page",
+    "measure_page",
     "list_attachments",
     "read_attachment",
 }

@@ -36,7 +36,7 @@ from .app import ODOO_ICON, mcp  # noqa: F401 -- mcp import triggers FastMCP set
 from .arg_mapping import convert_args_to_v2
 from .attachment_content import METADATA_FIELDS, TEXT_MIMETYPES, preview_content
 from .attachments import attachment_values
-from .capture import CaptureClip, CaptureRequest, Viewport, run_capture
+from .capture import CaptureClip, CapturePadding, CaptureRequest, Viewport, run_capture
 from .capture_policy import CaptureError, CapturePolicy, safe_url
 from .constants import (
     _READ_RESOURCE_MAX_CHARS,
@@ -748,6 +748,72 @@ def upload_attachment(
 
 @mcp.tool(
     description=(
+        "FIRST STEP for region screenshots: identify actual anchor selectors from current page HTML "
+        "or selectors supplied by the user, then call measure_page. Never guess coordinates or brute-force "
+        "selectors/crops. This read-only tool returns per-anchor bounds, page dimensions, viewport and a "
+        "suggested clip={x,y,width,height}; no screenshot is taken and no attachment is created. "
+        "One or multiple anchors define a suggested rectangle including intervening space; "
+        "optional padding extends it. "
+        "The suggestion is ADVISORY: the agent decides the final region using these measured coordinates, "
+        "and may expand, shrink, combine or crop it. NEXT: call capture_page with your chosen clip. "
+        "No measurement token or exact-coordinate match is required. Keep the same viewport/browser settings "
+        "for consistent layout; remeasure if layout changes. Coordinates are page-relative CSS pixels."
+    ),
+    annotations={"readOnlyHint": True, "openWorldHint": True},
+)
+def measure_page(
+    ctx: Context,
+    url: str,
+    selectors: list[str],
+    padding: CapturePadding | None = None,
+    expected_text: str | None = None,
+    viewport: Viewport | None = None,
+    device_scale_factor: float = 1,
+    wait_until: Literal["load", "domcontentloaded", "networkidle"] = "networkidle",
+    wait_for_selector: str | None = None,
+    extra_delay_ms: int = 0,
+    color_scheme: Literal["light", "dark"] | None = None,
+    cookies: list[dict[str, SecretStr]] | None = None,
+    headers: dict[str, SecretStr] | None = None,
+) -> ExecuteMethodResponse:
+    """Return server-suggested coordinates before any screenshot or attachment write."""
+    started = time.time()
+    try:
+        request = CaptureRequest(
+            url=url,
+            selectors=selectors,
+            padding=padding or CapturePadding(),
+            expected_text=expected_text,
+            viewport=viewport or Viewport(),
+            device_scale_factor=device_scale_factor,
+            wait_until=wait_until,
+            wait_for_selector=wait_for_selector,
+            extra_delay_ms=extra_delay_ms,
+            color_scheme=color_scheme,
+            cookies=cookies or [],
+            headers=headers or {},
+        )
+        if not request.selectors:
+            raise CaptureError("measure_page requires at least one anchor selector")
+        policy = CapturePolicy.from_env()
+        policy.validate_url(url)
+        odoo = get_odoo_client()
+        identity = hashlib.sha256(f"{odoo.url}\0{odoo.username}".encode()).hexdigest()
+        measured = run_capture(request, policy, identity, measure_only=True)
+        measured.pop("success", None)
+        return ExecuteMethodResponse(success=True, result=measured, execution_time_ms=_elapsed_ms(started))
+    except ValidationError:
+        return ExecuteMethodResponse(
+            success=False, error="Invalid measurement inputs; check anchors and browser options"
+        )
+    except CaptureError as exc:
+        return ExecuteMethodResponse(success=False, error=str(exc))
+    except Exception:
+        return ExecuteMethodResponse(success=False, error="Page measurement failed; check server configuration")
+
+
+@mcp.tool(
+    description=(
         "Capture a webpage on the server using Playwright and save it in Odoo ir.attachment. "
         "Returns attachment ID and metadata only; never returns screenshot bytes. Use read_attachment "
         "explicitly when the user wants to view it. Capture is restricted to configured hosts. "
@@ -755,12 +821,14 @@ def upload_attachment(
         "inputs with confirmed=true and the returned confirmation_token. Cookies accept name/value "
         "pairs only; headers and cookies are ephemeral and scoped to the source site. "
         "Captured URLs omit query strings from stored metadata. Non-2xx pages are still captured. "
-        "For section screenshots use clip={x:0,y:800,width:1440,height:600}, PNG/JPEG only. "
-        "Coordinates are CSS pixels from the document top-left, not viewport or preview pixels. "
-        "clip overrides full_page and must fit within the page. Selector cropping has been removed. "
-        "First capture an overview, then capture a rectangle using the same viewport. Convert scaled "
-        "preview coordinates back to CSS pixels and add any tile offset before selecting the rectangle. "
-        "device_scale_factor changes resolution, not clip coordinates."
+        "REGION WORKFLOW: Identify real anchor elements from HTML or user-supplied selectors, then call "
+        "measure_page FIRST to obtain element bounds and suggested coordinates. Never guess coordinates "
+        "from a preview or brute-force trial crops. The agent chooses the final region based on those measurements; "
+        "it may expand, shrink, combine or crop the suggestion. Pass your chosen clip={x,y,width,height} here. "
+        "The suggestion is advisory: no measurement token, exact-match check or automatic remeasurement is required. "
+        "Coordinates are CSS pixels from the document top-left; clip overrides full_page and is PNG/JPEG only. "
+        "Use the same viewport/browser settings as measurement; remeasure if layout changes. "
+        "Only normal coordinate/page/size limits apply to clip. Omit clip for whole-page/viewport capture."
     ),
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": True},
 )
@@ -830,7 +898,7 @@ def capture_page(
                 "captured_at": captured["captured_at"],
                 "viewport": request.viewport.model_dump(),
                 "device_scale_factor": device_scale_factor,
-                "clip": request.clip.model_dump() if request.clip else None,
+                "clip": captured.get("clip"),
                 "http_status": captured["http_status"],
             },
             ensure_ascii=False,
@@ -867,8 +935,8 @@ def capture_page(
         return ExecuteMethodResponse(
             success=False,
             error=(
-                "Invalid capture inputs; check clip (PNG/JPEG only, finite nonnegative x/y, "
-                "positive width/height), viewport, credentials and limits"
+                "Invalid capture inputs; check clip (PNG/JPEG only, nonnegative x/y, positive width/height), "
+                "viewport, credentials and limits"
             ),
         )
     except (CaptureError, ValueError) as exc:

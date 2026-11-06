@@ -102,7 +102,7 @@ working browser returns an installation/sandbox error and creates no attachment.
 | `wait_for_selector` | Optional visible element to wait for |
 | `extra_delay_ms` | 0; maximum 10000 |
 | `color_scheme` | `light` or `dark`; light if omitted |
-| `clip` | Optional `{x, y, width, height}` rectangle in page CSS pixels; PNG/JPEG only; overrides `full_page` |
+| `clip` | Agent-chosen `{x, y, width, height}` in page CSS pixels; PNG/JPEG only; overrides `full_page` |
 | `cookies` | Optional `[{"name":"session_id","value":"..."}]`; source-host scope only |
 | `headers` | Optional request header map; restricted headers are refused |
 | `res_model`, `res_id` | Supply together to link to an existing Odoo record; otherwise unlinked |
@@ -223,7 +223,7 @@ and process cleanup. At most 16 requests wait for a worker. The process group is
 killed at the total deadline. Rate/concurrency state is process-local and resets
 on restart; multiple MCP replicas need an external shared limiter for global
 quotas. Captures also have a 4096px width and 60 megapixel bound. Oversized pages
-fail clearly; use clip, reduce scale, or set `full_page=false`.
+fail clearly; select a section, reduce scale, or set `full_page=false`.
 
 Writes honor existing readonly roles, `MCP_READ_ONLY`, `MCP_WRITE_ALLOWLIST`
 (`ir.attachment.create`), locked-mode schema validation and confirmation rules.
@@ -247,20 +247,43 @@ Chromium and a host permitting its sandbox. A live Odoo test additionally
 requires a designated development account/database; ordinary unit tests never
 write attachments to a live instance.
 
-### Section screenshots
+### Region screenshots: measure for guidance, then choose the crop
 
-Use `"clip": {"x": 0, "y": 800, "width": 1440, "height": 600}` with
-`"format": "png"` or `"jpeg"`. This replaces `selector` cropping;
-`wait_for_selector` remains available for waiting only. Omit clip for normal capture.
-Coordinates use CSS pixels from the document top-left, independent of device scale.
-The rectangle must fit within the document and existing dimension/megapixel limits.
-Offsets must be finite and nonnegative; dimensions must be finite and positive.
-PDF/HTML/text/Markdown reject clip. Clip overrides full_page.
+1. Identify real anchor elements from page HTML (`capture_page` with `format="html"`,
+   then `read_attachment`), or use selectors supplied by the user. Do not invent
+   selectors, estimate page coordinates from previews or brute-force trial crops.
+2. Call the read-only `measure_page` tool. It accepts `url`, one to 32 `selectors`,
+   optional `padding` (`top`, `right`, `bottom`, `left`, nonnegative CSS pixels up to
+   4096 each), optional `expected_text`, and the usual viewport/browser options.
+   Each selector must identify one visible anchor, but a request can measure many
+   sections. The server loads the elements and waits for stable layout, then returns
+   individual `anchors`, `page_dimensions`, `viewport` and a suggested enclosing `clip`.
+   **No screenshot is taken and no attachment is created.**
 
-The MCP tool description and schema teach agents this syntax: capture an overview,
-then a section using the same viewport. Undo preview scaling and add tile offsets
-before converting preview coordinates to page CSS pixels.
+   ```json
+   {
+     "url": "https://example.leonix.cc/page",
+     "selectors": ["#first-section", "#last-section"],
+     "viewport": {"width": 1440, "height": 900}
+   }
+   ```
 
-Coordinate clips below the viewport are captured with Playwright's full-document
-coordinate mode internally. This still returns only the requested rectangle,
-not a full-page image; callers do not need to scroll or adjust the viewport.
+3. The agent decides the final region using the measured bounds: copy the suggestion,
+   expand it for context, shrink it to inspect details, or combine measured sections.
+   Call `capture_page` with `url`, the chosen `clip` and matching viewport/browser settings.
+   The crop need not match the suggestion. `selectors`, `padding` and `expected_text`
+   belong only to measurement and are not arguments to `capture_page`.
+4. Capture uses the chosen coordinates directly. It checks ordinary coordinate,
+   page-boundary, dimension, megapixel and byte limits, not equality with a measurement.
+   No proof cache, measurement token, expiry, identity binding, or automatic
+   remeasurement is involved. The existing attachment-write `confirmation_token`
+   flow still applies in strict mode.
+5. Use `read_attachment` to inspect the saved image. If the page layout changed
+   between calls, remeasure before deciding on a new crop instead of blindly retrying.
+
+The measure-first/no-guessing workflow is taught in MCP tool descriptions; it is
+agent guidance rather than a server-enforced coordinate constraint. Measurement and
+capture use fresh isolated browsers with the same security policy and quotas, so
+keep viewport, scale, fonts and other rendering inputs consistent. Measurements
+contain untrusted page data and are advisory snapshots, not a locked browser session.
+Omit `clip` for whole-page/viewport capture. Region screenshots support PNG/JPEG.

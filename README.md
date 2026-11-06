@@ -38,7 +38,7 @@ layer blocks every non-safe method.
 
 | | |
 |---|---|
-| **7 tools** | Universal model access, batches, resource discovery, and screenshot/file attachments |
+| **8 tools** | Universal model access, batches, resource discovery, and screenshot/file attachments |
 | **38 resources** | Model discovery, compact schemas, state-machine workflows, introspection, API reference (`odoo://api/*`), and runtime posture (`odoo://server-status`) |
 | **12 prompts** | Generic guided workflows (aging reports, inventory checks, domain building, pagination, …) |
 | **Safety layer** | Risk classification before execution, 8 blocked models, 6 sensitive models, cascade warnings |
@@ -274,7 +274,8 @@ token issued for `unlink([1])` and reuse it on `unlink([1, 2, …, 1000])`.
 | `batch_execute` | Multiple operations with progress tracking |
 | `read_resource` | Read any `odoo://` resource by URI |
 | `upload_attachment` | Store file bytes as a non-public Odoo attachment |
-| `capture_page` | Capture a URL on the server and return stored attachment metadata |
+| `measure_page` | Suggest verified coordinates for one or multiple page sections without taking a screenshot |
+| `capture_page` | Capture a URL or verified measurement and return stored attachment metadata |
 | `list_attachments` | Find attachment metadata without fetching file bytes |
 | `read_attachment` | Explicitly retrieve an image tile, text, or PDF preview |
 
@@ -306,10 +307,14 @@ await client.call_tool("capture_page", {
 })
 ```
 
-For a section screenshot, pass `"clip": {"x": 0, "y": 800, "width": 1440, "height": 600}`
-with PNG or JPEG. Coordinates are page-relative CSS pixels; clip overrides
-`full_page` and replaces selector cropping. Keep the same viewport as your overview.
-The tool's MCP description and input schema explain this syntax to agents.
+For a region screenshot, identify one or more anchor elements from page HTML and
+call `measure_page` to get their bounds, page dimensions and a suggested `clip`.
+The agent then decides the final rectangle: it can expand, shrink or combine regions
+using the measured coordinates, and passes its chosen `clip` to `capture_page`.
+Suggestions are advisory; no measurement token or exact-coordinate match is required.
+Use consistent viewport/browser settings, and remeasure when layout changes rather
+than guessing or trying crops. The existing strict-mode attachment-write confirmation
+still applies to `capture_page`.
 
 `capture_page` renders on the server, stores a non-public `ir.attachment`, and
 returns its ID and metadata **without sending the screenshot to the conversation**.
@@ -655,7 +660,7 @@ Full documentation lives in the **[Wiki](https://github.com/AlanOgic/odoo-mcp-19
 **Start here**
 
 - [Getting started](https://github.com/AlanOgic/odoo-mcp-19/wiki/Getting-Started) — install and connect in five minutes
-- [Tools](https://github.com/AlanOgic/odoo-mcp-19/wiki/Tools) — the 7 tools, their parameters, and when to reach for each
+- [Tools](https://github.com/AlanOgic/odoo-mcp-19/wiki/Tools) — the 8 tools, their parameters, and when to reach for each
 - [Resources](https://github.com/AlanOgic/odoo-mcp-19/wiki/Resources) — the 27 `odoo://` discovery URIs
 
 **Reference**

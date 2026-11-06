@@ -34,6 +34,16 @@ class CaptureClip(BaseModel):
     height: float = Field(gt=0, allow_inf_nan=False)
 
 
+class CapturePadding(BaseModel):
+    """Explicit CSS-pixel margins around the union of measured anchor elements."""
+
+    model_config = ConfigDict(extra="forbid")
+    top: float = Field(default=0, ge=0, le=4096, allow_inf_nan=False)
+    right: float = Field(default=0, ge=0, le=4096, allow_inf_nan=False)
+    bottom: float = Field(default=0, ge=0, le=4096, allow_inf_nan=False)
+    left: float = Field(default=0, ge=0, le=4096, allow_inf_nan=False)
+
+
 class CaptureRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str = Field(max_length=8192)
@@ -46,6 +56,9 @@ class CaptureRequest(BaseModel):
     extra_delay_ms: int = Field(default=0, ge=0, le=10000)
     color_scheme: Literal["light", "dark"] | None = None
     clip: CaptureClip | None = None
+    selectors: list[str] | None = Field(default=None, min_length=1, max_length=32)
+    padding: CapturePadding = Field(default_factory=CapturePadding)
+    expected_text: str | None = Field(default=None, min_length=1, max_length=1024)
     # SecretStr prevents validation/repr from revealing values. Worker input uses explicit extraction.
     headers: dict[str, SecretStr] = Field(default_factory=dict)
     cookies: list[dict[str, SecretStr]] = Field(default_factory=list)
@@ -54,6 +67,19 @@ class CaptureRequest(BaseModel):
     def validate_credentials(self):
         if self.clip is not None and self.format not in {"png", "jpeg"}:
             raise ValueError("clip is supported only for PNG and JPEG screenshots")
+        if self.clip is not None and self.selectors:
+            raise ValueError("Use selectors for measurement or clip for capture, not both")
+        if self.selectors is not None:
+            if any(not s.strip() or len(s) > 1024 for s in self.selectors):
+                raise ValueError("Each anchor selector must be nonblank and at most 1024 characters")
+            if len(set(self.selectors)) != len(self.selectors):
+                raise ValueError("Duplicate anchor selectors are not allowed")
+            if self.format not in {"png", "jpeg"}:
+                raise ValueError("Anchor selectors are supported only for PNG and JPEG screenshots")
+        if self.expected_text is not None and (not self.selectors or not self.expected_text.strip()):
+            raise ValueError("expected_text requires selectors and nonblank text")
+        if not self.selectors and any(self.padding.model_dump().values()):
+            raise ValueError("padding requires anchor selectors")
         if len(self.headers) > 20 or len(self.cookies) > 30:
             raise ValueError("Too many capture headers or cookies")
         for key, value in self.headers.items():
@@ -132,7 +158,13 @@ def _claim_slot(identity: str, policy: CapturePolicy):
         _ACTIVE += 1
 
 
-def run_capture(request: CaptureRequest, policy: CapturePolicy, identity: str) -> dict:
+def run_capture(
+    request: CaptureRequest,
+    policy: CapturePolicy,
+    identity: str,
+    *,
+    measure_only: bool = False,
+) -> dict:
     """No browser, cookies, Odoo keys or files persist between capture processes."""
     global _ACTIVE
     policy.validate_url(request.url)
@@ -164,7 +196,13 @@ def run_capture(request: CaptureRequest, policy: CapturePolicy, identity: str) -
         )
         try:
             output, _ = process.communicate(
-                json.dumps({"request": request.worker_payload(), "policy": asdict(policy)}).encode(),
+                json.dumps(
+                    {
+                        "request": request.worker_payload(),
+                        "policy": asdict(policy),
+                        "measure_only": measure_only,
+                    }
+                ).encode(),
                 timeout=policy.timeout,
             )
         except subprocess.TimeoutExpired:

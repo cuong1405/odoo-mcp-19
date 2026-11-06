@@ -6,7 +6,7 @@ import json
 import sys
 from datetime import datetime, timezone
 
-from .capture import origin
+from .capture import CaptureClip, origin
 from .capture_policy import CaptureError, CapturePolicy, safe_url
 from .capture_proxy import capture_proxy
 
@@ -20,11 +20,73 @@ MIMETYPES = {
 }
 
 
-async def render(request, policy):
+# Read layout and identity together; all coordinates stay inside this browser session.
+SECTION_BOUNDS = """el => {
+    const r = el.getBoundingClientRect();
+    const x = Math.floor(r.left + scrollX), y = Math.floor(r.top + scrollY);
+    return {x, y, width: Math.ceil(r.right + scrollX) - x,
+            height: Math.ceil(r.bottom + scrollY) - y};
+}"""
+
+
+def region_clip(bounds, padding):
+    """Derive one rectangle from measured anchors, with explicit outward padding."""
+    import math
+
+    x = math.floor(min(box["x"] for box in bounds) - padding["left"])
+    y = math.floor(min(box["y"] for box in bounds) - padding["top"])
+    right = math.ceil(max(box["x"] + box["width"] for box in bounds) + padding["right"])
+    bottom = math.ceil(max(box["y"] + box["height"] for box in bounds) + padding["bottom"])
+    try:
+        for box in bounds:
+            CaptureClip(**box)
+        return CaptureClip(x=x, y=y, width=right - x, height=bottom - y).model_dump()
+    except ValueError:
+        raise CaptureError("Measured region or padding has empty, negative or oversized bounds") from None
+
+
+async def measure_region(page, selectors, expected_text, padding):
+    targets = [page.locator(selector) for selector in selectors]
+    for target in targets:
+        if await target.count() != 1:
+            raise CaptureError("Each anchor selector must match exactly one element; inspect the page HTML")
+        await target.wait_for(state="visible")
+    # Settle animations before measuring: screenshot's animation handling must not move anchors.
+    await page.add_style_tag(content="*, *::before, *::after {animation: none !important; transition: none !important}")
+    texts = []
+    for target in targets:
+        await target.scroll_into_view_if_needed()
+        await target.evaluate("""async el => {
+            await document.fonts.ready;
+            await Promise.all(Array.from(el.querySelectorAll('img'), img => {
+                img.loading = 'eager';
+                return img.decode().catch(() => {});
+            }));
+        }""")
+        texts.append(" ".join((await target.inner_text()).split()))
+    if expected_text and " ".join(expected_text.split()) not in " ".join(texts):
+        raise CaptureError("Anchor content does not match expected_text; inspect the page HTML")
+    # Sample all anchors together only after scrolling/loading every anchor. Never try alternative crops.
+    previous = None
+    stable_frames = 0
+    for _ in range(12):
+        await page.evaluate("() => new Promise(resolve => requestAnimationFrame(resolve))")
+        bounds = [await target.evaluate(SECTION_BOUNDS) for target in targets]
+        stable_frames = stable_frames + 1 if bounds == previous else 0
+        if stable_frames >= 2:
+            anchors = [{"selector": selector, "clip": box} for selector, box in zip(selectors, bounds)]
+            return targets, anchors, region_clip(bounds, padding)
+        previous = bounds
+    raise CaptureError("Anchor layout is moving; no screenshot was taken")
+
+
+async def render(request, policy, *, measure_only=False):
     try:
         from playwright.async_api import Error, TimeoutError, async_playwright
     except ImportError:
         raise CaptureError("Install odoo-mcp-19[capture] and run playwright install chromium") from None
+    if request["selectors"] and not measure_only:
+        raise CaptureError("Use measure_page for anchors, then capture_page with the region you choose")
     policy.validate_url(request["url"])
     credential_origin = origin(request["url"]) if request["headers"] or request["cookies"] else None
     with capture_proxy(policy, credential_origin) as proxy:
@@ -97,7 +159,17 @@ async def render(request, policy):
                         height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0),
                         width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0)
                     })""")
+                    anchors = []
                     clip = request["clip"]
+                    if request["selectors"]:
+                        _, anchors, clip = await measure_region(
+                            page, request["selectors"], request["expected_text"], request["padding"]
+                        )
+                        # Scrolling to load a section may change the document dimensions.
+                        dimensions = await page.evaluate("""() => ({
+                            height: Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight || 0),
+                            width: Math.max(document.documentElement.scrollWidth, document.body?.scrollWidth || 0)
+                        })""")
                     if clip:
                         if clip["height"] > policy.max_height or clip["width"] > 4096:
                             raise CaptureError("Clip exceeds capture dimensions")
@@ -109,7 +181,9 @@ async def render(request, policy):
                     elif request["full_page"] and (
                         dimensions["height"] > policy.max_height or dimensions["width"] > 4096
                     ):
-                        raise CaptureError("Page exceeds capture dimensions; use full_page=false or clip")
+                        raise CaptureError(
+                            "Page exceeds capture dimensions; use full_page=false or choose a smaller clip"
+                        )
                     capture_width = (
                         clip["width"]
                         if clip
@@ -121,7 +195,24 @@ async def render(request, policy):
                         else dimensions["height"] if request["full_page"] else request["viewport"]["height"]
                     )
                     if capture_width * capture_height * request["device_scale_factor"] ** 2 > 60_000_000:
-                        raise CaptureError("Capture exceeds the 60 megapixel limit; reduce scale, viewport or use clip")
+                        raise CaptureError(
+                            "Capture exceeds the 60 megapixel limit; reduce scale, viewport or clip size"
+                        )
+                    if measure_only:
+                        if not clip:
+                            raise CaptureError("Measurement requires anchor selectors")
+                        return {
+                            "success": True,
+                            "clip": clip,
+                            "anchors": anchors,
+                            "selectors": request["selectors"],
+                            "viewport": request["viewport"],
+                            "page_dimensions": dimensions,
+                            "url_final": safe_url(page.url),
+                            "title": (await page.title())[:512],
+                            "http_status": response.status if response else None,
+                            "blocked_subrequests": bool(blocked or proxy.blocked),
+                        }
                     fmt = request["format"]
                     if fmt in {"png", "jpeg"}:
                         options = {"type": fmt, "animations": "disabled", "timeout": policy.navigation_timeout * 1000}
@@ -148,6 +239,9 @@ async def render(request, policy):
                         "success": True,
                         "content_base64": base64.b64encode(data).decode("ascii"),
                         "mimetype": MIMETYPES[fmt],
+                        "selectors": request["selectors"],
+                        "anchors": anchors,
+                        "clip": clip,
                         "size": len(data),
                         "url_final": safe_url(page.url),
                         "title": (await page.title())[:512],
@@ -174,9 +268,18 @@ async def render(request, policy):
 
 def main():
     try:
-        payload = json.loads(sys.stdin.buffer.read(65536))
+        raw = sys.stdin.buffer.read(262145)
+        if len(raw) > 262144:
+            raise CaptureError("Capture worker input exceeds the size limit")
+        payload = json.loads(raw)
         policy = CapturePolicy(**payload["policy"])
-        result = asyncio.run(render(payload["request"], policy))
+        result = asyncio.run(
+            render(
+                payload["request"],
+                policy,
+                measure_only=payload.get("measure_only", False),
+            )
+        )
     except CaptureError as exc:
         result = {"success": False, "error": str(exc)}
     except Exception:
