@@ -260,3 +260,7 @@ PDF/HTML/text/Markdown reject clip. Clip overrides full_page.
 The MCP tool description and schema teach agents this syntax: capture an overview,
 then a section using the same viewport. Undo preview scaling and add tile offsets
 before converting preview coordinates to page CSS pixels.
+
+Coordinate clips below the viewport are captured with Playwright's full-document
+coordinate mode internally. This still returns only the requested rectangle,
+not a full-page image; callers do not need to scroll or adjust the viewport.

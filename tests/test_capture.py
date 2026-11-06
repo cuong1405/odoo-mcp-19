@@ -341,4 +341,48 @@ def test_worker_uses_page_relative_clip(fmt, clip, error):
         result = asyncio.run(render(request, policy()))
     assert result["success"]
     options = page.screenshot.call_args.kwargs
-    assert options["clip"] == clip and options["full_page"] is False
+    assert options["clip"] == clip and options["full_page"] is True
+
+
+@pytest.mark.parametrize("scale", [1, 2])
+def test_real_browser_clip_below_viewport(scale):
+    """Exercise the worker with real Chromium and deterministic, network-free page content."""
+    import asyncio
+    from contextlib import nullcontext
+    from pathlib import Path
+
+    playwright_api = pytest.importorskip("playwright.async_api")
+    Route, async_playwright = playwright_api.Route, playwright_api.async_playwright
+    from PIL import Image
+
+    from odoo_mcp.capture_worker import render
+
+    async def serve_page(route, **kwargs):
+        await route.fulfill(
+            content_type="text/html",
+            body="""
+            <style>body {margin:0; height:4000px; background:red}
+            #target {position:absolute; left:200px; top:1800px;
+                     width:600px; height:400px; background:rgb(0,128,0)}</style>
+            <div id="target"></div>""",
+        )
+
+    async def capture():
+        async with async_playwright() as playwright:
+            if not Path(playwright.chromium.executable_path).exists():
+                pytest.skip("Install Chromium with playwright install chromium")
+        request = CaptureRequest(
+            url="https://test.leonix.cc",
+            device_scale_factor=scale,
+            clip=dict(x=200, y=1800, width=600, height=400),
+        )
+        proxy = MagicMock(server_address=("127.0.0.1", 1234), blocked=False)
+        with patch.object(Route, "continue_", serve_page), patch(
+            "odoo_mcp.capture_worker.capture_proxy", return_value=nullcontext(proxy)
+        ):
+            return await render(request.worker_payload(), policy())
+
+    result = asyncio.run(capture())
+    with Image.open(io.BytesIO(base64.b64decode(result["content_base64"]))) as image:
+        assert image.size == (600 * scale, 400 * scale)
+        assert image.getextrema() == ((0, 0), (128, 128), (0, 0))

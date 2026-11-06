@@ -82,11 +82,13 @@ async def render(request, policy):
                 page.on("dialog", lambda dialog: dialog.dismiss())
                 # Do not permit page scripts to spawn additional tabs or browser windows.
                 context.on("page", lambda popup: popup.close() if popup != page else None)
+                navigation_complete = False
                 try:
                     response = await page.goto(
                         request["url"], wait_until=request["wait_until"], timeout=policy.navigation_timeout * 1000
                     )
                     policy.validate_url(page.url)
+                    navigation_complete = True
                     if request["wait_for_selector"]:
                         await page.locator(request["wait_for_selector"]).first.wait_for(state="visible")
                     if request["extra_delay_ms"]:
@@ -126,7 +128,7 @@ async def render(request, policy):
                         if fmt == "jpeg":
                             options["quality"] = 85
                         if clip:
-                            data = await page.screenshot(clip=clip, full_page=False, **options)
+                            data = await page.screenshot(clip=clip, full_page=True, **options)
                         else:
                             data = await page.screenshot(full_page=request["full_page"], **options)
                     elif fmt == "pdf":
@@ -159,10 +161,12 @@ async def render(request, policy):
                     message = str(exc)
                     if proxy.failure:
                         raise CaptureError(proxy.failure) from None
-                    if blocked:
+                    if blocked and not navigation_complete:
                         raise CaptureError("Navigation or redirect blocked by capture host policy") from None
                     if "ERR_CERT" in message or "ERR_SSL" in message:
                         raise CaptureError("Capture TLS certificate validation failed") from None
+                    if navigation_complete:
+                        raise CaptureError("Page rendering or screenshot capture failed") from None
                     raise CaptureError("Capture navigation failed") from None
             finally:
                 await browser.close()
